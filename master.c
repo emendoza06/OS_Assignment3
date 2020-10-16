@@ -37,7 +37,7 @@
 
 //Shared memory global
 typedef struct{
-	char words[64][64]; 		//Assuming 20 words in a file with length 256 max
+	char words[64][64]; 		//Array holding strings from file
 	unsigned int children_count;	//The amount of child processes
 
 	//memory attributes
@@ -85,7 +85,7 @@ int main(int argc, char* argv[]){
 	//If key generation fails then return with error message
 	if(key == -1) { 
 		perror("\nERROR: Could not generate key\n");
-		return 1;
+		exit(1);
 	}	
 
 
@@ -165,7 +165,7 @@ int main(int argc, char* argv[]){
 	//If creation of shared memory segment fails then return with error message
 	if(shmid == -1) { 
 		perror("\nERROR: Could not create shared memory segment");
-		return 1;
+		exit(1);
 	}
 
 	//Use shmat to attach shmid's shared memory segment to the address space of the calling process
@@ -173,7 +173,7 @@ int main(int argc, char* argv[]){
 	//If memory segment could not be attached then return with error message 
 	if(shm_data_ptr == (void*)-1) {
 		perror("\nERROR: Could not attach shared memory");
-		return 1;
+		exit(1);
 	}
 
 
@@ -183,7 +183,7 @@ int main(int argc, char* argv[]){
 
 	//use ftok to convert pathname and id value 'b' to System V IPC key
 	//Separate from shared memory key
-	shm_data_ptr->sem_key = ftok("./master", 'b');
+	shm_data_ptr->sem_key = ftok("./master", 'J');
 	//If key generation fails then return with error message 
 	if(shm_data_ptr->sem_key == -1) { 
 		perror("\nERROR: Could not generate SEM key");
@@ -192,7 +192,7 @@ int main(int argc, char* argv[]){
 
 	//Get an id that can be used to access the System V semaphore with the given key
 	//Sets permissions, creates a new segment, and fails if segment already exists
-	shm_data_ptr->sem_id = semget(shm_data_ptr->sem_key, 1, 0666 | IPC_CREAT | IPC_EXCL);
+	shm_data_ptr->sem_id = semget(shm_data_ptr->sem_key, 1, 0666 | IPC_CREAT);
 	if(shm_data_ptr->sem_id == -1) { 
 		perror("\nERROR: Failed to create semaphore identifier");
 		exit(1);
@@ -373,4 +373,11 @@ void free_shared_mem(){
 }
 
 
+void free_sem(){
+	//If there was an error removing semaphore, return with error message
+	if(semctl(shm_data_ptr->sem_id, 0, IPC_RMID) == -1) { 
+		perror("\nERROR: Could not remove semaphore");
+		exit(1);
+	}
+}
 
