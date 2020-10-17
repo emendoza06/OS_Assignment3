@@ -51,6 +51,7 @@ typedef struct{
 shared_memory_data* shm_data_ptr; 	//shared memory pointer to shared memory struct
 unsigned int shmid;			//shared memory segment id
 int spawn_count;			//Tracks the amount of times a spawn was tried
+int child_index;				//index tracker
 int curr_processes_running = 0;		//Tracks the current amount of processes running
 
 
@@ -61,10 +62,13 @@ int forced_time_quit = 100;		//Time in seconds when the process will termiante
 
 
 //Prototypes
-void run_child(int spawn_count);	//Creates child and sends to palin
+void check_before_run_child(int index);	//Check that a child can be spawned
+void run_child(int index);		//Spawns and sends to palin
 void free_shared_mem();			//Frees shared memory
 void free_sem();			//Frees semephore
-
+void sighandle(int signal);		//Function that receives signal
+void run_timer(int seconds);		//Function that tracks time
+void sighandle_time(int signal);	//Function that receives time signal
 
 
 
@@ -76,6 +80,11 @@ void free_sem();			//Frees semephore
 
 
 int main(int argc, char* argv[]){ 
+
+/*----------------------Signal Handler------------------------------------------*/
+
+	signal(SIGINT, sighandle);
+
 
 /*---------------------Create shared memory key----------------------------------*/
 	
@@ -119,6 +128,7 @@ int main(int argc, char* argv[]){
 				if(max_total_cp > 20) { 
 					max_total_cp = 20;
 				}
+				//Error if child processes <= 0
 				if(max_total_cp <= 0) { 
 					printf("\nERROR: total child processes must be betwen 1-20\n");
 					return EXIT_FAILURE;
@@ -130,6 +140,7 @@ int main(int argc, char* argv[]){
 			case 's': 
 				//user input replaces default value
 				max_concurr_children = atoi(optarg);
+				//Error if concurrent child proceses <= 0
 				if(max_concurr_children <= 0){ 
 					printf("\nERROR: There must be at least 1 concurrent process\n");
 					return EXIT_FAILURE;
@@ -139,7 +150,9 @@ int main(int argc, char* argv[]){
 			
 			//The time in seconds after which the process will terminate, even if it has not finished 
 			case 't': 
+				//User input replaces default
 				forced_time_quit = atoi(optarg);
+				//Error if seconds is <= 0 
 				if(forced_time_quit <= 0) { 
 					printf("\nERROR: Time must be at least 1\n");
 					return EXIT_FAILURE;
@@ -151,7 +164,6 @@ int main(int argc, char* argv[]){
 				printf("\nERROR: use option -h for help.\n");
 				return EXIT_FAILURE;
 		}
-		
 	}	
 
 
@@ -183,7 +195,7 @@ int main(int argc, char* argv[]){
 
 	//use ftok to convert pathname and id value 'b' to System V IPC key
 	//Separate from shared memory key
-	shm_data_ptr->sem_key = ftok("./master", 'J');
+	shm_data_ptr->sem_key = ftok("master.c", 'J');
 	//If key generation fails then return with error message 
 	if(shm_data_ptr->sem_key == -1) { 
 		perror("\nERROR: Could not generate SEM key");
@@ -239,6 +251,10 @@ int main(int argc, char* argv[]){
 	fclose(fptr);
 	
 
+/*------------------Start timer------------------------------------------------------------*/
+	//Run timer to user's input value for time
+	run_timer(forced_time_quit);
+
 
 
 /*------------------Set value boundaries for child processes------------------------------*/	
@@ -262,40 +278,24 @@ int main(int argc, char* argv[]){
 
 /*-----------------Procedure for checking requirements before spawning children-------------------------*/	
 
+	child_index = 0; 
 	//Keep spawning until the spawn number reaches the allowed amount of max total child processes
-	//First check that amount of children allowed to exist at the same time is not being exceeded 
-	while(spawn_count < max_concurr_children){
-		//Increase spawn count
-		spawn_count++;
-		/*Check amount of current processes running does not exceed amount of children allowed
-		to exist at the same time and that we have not reached max total amount of child processes*/
-		if((curr_processes_running  < max_concurr_children) && (spawn_count < max_total_cp)){
-			run_child(spawn_count);
-		}
-		//Requirements to spawn have not been met; do not spawn. Reduce spawn count 
-		else {
-			spawn_count--;
-		}
+	//Check that amount of children allowed to exist at the same time is not being exceeded 
+	while(child_index < max_concurr_children){
+		
+		check_before_run_child(child_index++);
 	}
-
-	/*If spawn count has exceeded amount of concurrent children, we can still spawn but we need to wait
-	for them to finish*/
-	while(curr_processes_running > 0) { 
+	
+	/*If amount of children allowed to exist at the same time is exceeded, we can still spawn
+	but we need to wait for process to finish before respawning*/
+	while(spawn_count > 0){
 		wait(NULL);
-		/*We have waited for process to end, so current processes running in the 
-		system has decremented*/
-		--curr_processes_running;
-		//Try to spawn now, increase spawn count
-		spawn_count++;
-		/*Check amount of current processes running does not exceed amount of children allowed
-		to exist at the same time and that we have not reached max total amount of child processes*/
-		if((curr_processes_running < max_concurr_children) && (spawn_count < max_total_cp)){
-			run_child(spawn_count);
+		//Try spawning as long as we have not reached max amount of chidren allowed to spawn
+		if(child_index < max_total_cp){
+			check_before_run_child(child_index++);
 		}
-		//Requirements to spawn have not been met; do not spawn. Reduce spawn count 
-		else { 
-			spawn_count--;
-		}
+		//Requirements to spawn have not been met; do not spawn. Reduce spawn count.
+		spawn_count--;
 	}
 
 
@@ -306,13 +306,11 @@ int main(int argc, char* argv[]){
 	the amount of children that we are allowed. Time to free memory*/
 	free_shared_mem();
 	free_sem();
+
 	
 	//Program ends here
-	return 0;
+	return 1;
 }
-
-
-
 
 
 
@@ -327,33 +325,49 @@ int main(int argc, char* argv[]){
 
 
 
-/*---------------------------Function for spawning children---------------------------------------------*/
+/*---------------------------Functions for spawning children---------------------------------------------*/
 
-void run_child(int spawn_count){
-	//Spawning increases the amount of current processes running
-	++curr_processes_running;
-	//If fork is successful
-	if(fork() == 0){
+//Function for checking requirements before spawning
+void check_before_run_child(int id){
+	/*Check that processes in system is under max concurrent allowed; amount spawned is less than total 		children allowed*/
+	if(((spawn_count < max_concurr_children) && (id < max_total_cp)) || ((max_concurr_children =1) && (id < max_total_cp))){
+		//Proceed to run child process
+		run_child(id);
+	} 
+	//Else requirements were not met and child cannot spawn. Decrease index by 1
+	else {	
+		child_index--;
+	}
+}
+
+//Function for sending child to palin
+void run_child(int id){
+	//Increase child spawned by 1
+	spawn_count++;
+	//process id
+	pid_t pid;
+	pid = fork();
+	//If fork was successful
+	if(pid == 0){
 		//The first instance of a child will set the group id
-		if(spawn_count ==1) { 
+		if(id == 0){
 			shm_data_ptr->pgid = getpid();
 		}
 		//Group processes together
 		setpgid(0, shm_data_ptr->pgid);
 		
-		//Before passing id to palin, need to convert argument to a string
+		//Before passing index to palin, need to convert argument to a string
 		char argument[256];
-		sprintf(argument, "%d", spawn_count + 1);	/*Spawn count +1 because we want id 
-								to start at 1, not 0*/
+		sprintf(argument, "%d", id);
 		//Send to palin
 		execl("./palin", "palin", argument, (char*) NULL);
-		exit(0);		
+		exit(1);
 	}
 }
 
 
 /*---------------------------Functions for releasing memory---------------------------------------------*/
-
+//Free shared memory function
 void free_shared_mem(){
 	//If shared memory struct has data, we need to release memory
 	if(shm_data_ptr != NULL){
@@ -372,7 +386,7 @@ void free_shared_mem(){
 	}
 }
 
-
+//Free semaphore function
 void free_sem(){
 	//If there was an error removing semaphore, return with error message
 	if(semctl(shm_data_ptr->sem_id, 0, IPC_RMID) == -1) { 
@@ -381,3 +395,46 @@ void free_sem(){
 	}
 }
 
+/*----------------------------Functions for signal handling-------------------------------------------*/
+//Function for parent to kill processes
+void sighandle(int signal){
+	//kill the children processes by group pid
+	killpg(shm_data_ptr->pgid, SIGTERM);
+	//Wait for children to finish
+	while(wait(NULL) > 0);
+	//Free memory
+	free_shared_mem();
+	exit(1);
+}
+
+//Timer algorithm from gnu.org
+void run_timer(int seconds){
+	struct sigaction sa;
+	sigemptyset(&sa.sa_mask);
+	sa.sa_handler = &sighandle_time;
+	sa.sa_flags = 0;
+	if(sigaction(SIGALRM, &sa, NULL) < 0){
+		perror("\nERROR: ");
+		exit(1);
+	}
+	struct itimerval new;
+	new.it_interval.tv_usec = 0;
+	new.it_interval.tv_sec = 0;
+	new.it_value.tv_usec = 0;
+	new.it_value.tv_sec = (long int) seconds;
+	if(setitimer (ITIMER_REAL, &new, NULL) < 0){
+		perror("\nERROR :");
+		exit(1);
+	}
+}
+
+//Parent forces processes stop when time runs out
+void sighandle_time(int signal){
+	//kill the children processes by group id
+	killpg(shm_data_ptr->pgid, SIGUSR1);
+	//Wait for children to finish
+	while(wait(NULL) > 0);
+	//Free memory
+	free_shared_mem();
+	exit(1);
+}

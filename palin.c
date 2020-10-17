@@ -47,16 +47,24 @@ typedef struct{
 shared_memory_data* shm_data_ptr;	//shared memory pointer to shared memory struct
 unsigned int shmid;			//shared memory segment id
 
-struct sembuf sem_obtain = {0, -1, 0};	/*Obtain one unit from semaphore, load sembuf array to
+//struct sembuf sem_obtain = {0, -1, 0};	/*Obtain one unit from semaphore, load sembuf array to
 				//	perform the operation*/
-struct sembuf sem_return = {0, +1, 0};	//Return resources back to the semaphore set
+//struct sembuf sem_return = {0, +1, 0};	//Return resources back to the semaphore set
 
 //Globals for children
-int child_id;				//holds id of current child
+//int child_id;				//holds id of current child
 time_t now;				//holds current time
 
 //Prototypes
 bool isPalindrome(char str[]);		//Returns true/false if a palinedrome
+void sighandle(int signal);		//Signal to kill processes
+int free_shared_mem();			//Free memory
+void timer_exits(int signal);		//Send signal to timer to exit
+
+
+
+
+
 
 
 /*=============================================================================*/
@@ -66,13 +74,12 @@ bool isPalindrome(char str[]);		//Returns true/false if a palinedrome
 /*=============================================================================*/
 
 int main(int argc, char* argv[]){ 
-
+	signal(SIGTERM, sighandle);
+	signal(SIGUSR1, timer_exits);
 
 /*--------------------------Procedure for reading passed arguments------------------*/
 
-	//Index of words array
-	int index;
-
+	int child_id;
 	//If spawn number was not passed into palin from master
 	if(argc < 2){
 		perror("\nERROR: Missing argument");
@@ -82,7 +89,7 @@ int main(int argc, char* argv[]){
 	else{
 		//Save passed argument
 		child_id = atoi(argv[1]);	
-		index = child_id - 1;		//Index starts at 0, not 1	
+		//index = child_id - 1;		//Index starts at 0, not 1	
 	}
 
 
@@ -128,11 +135,12 @@ int main(int argc, char* argv[]){
 
 /*----------------------Check if a palidrome--------------------------------------------*/
 
-	bool palin = isPalindrome(shm_data_ptr->words[index]);
+	bool palin = isPalindrome(shm_data_ptr->words[child_id]);
 
 
 
 /*---------------------Procedure to for semaphore wait----------------------------------------*/
+	//Semaphore wait idea from stackoverflow
 	struct sembuf sem_op;
 	//Wait on semaphore
 	sem_op.sem_num = 0; 
@@ -160,8 +168,8 @@ int main(int argc, char* argv[]){
 		exit(1);
 	}
 	//Write word to file at index position
-	fprintf(palin_file, "%s\n", shm_data_ptr->words[index]);
-	printf("Wrote %s to file\n", shm_data_ptr->words[index]);
+	fprintf(palin_file, "%s\n", shm_data_ptr->words[child_id]);
+	printf("Wrote %s to file\n", shm_data_ptr->words[child_id]);
 	//Close file
 	fclose(palin_file);
 
@@ -172,7 +180,7 @@ int main(int argc, char* argv[]){
 		exit(1);
 	}
 	//Write to output.log
-	fprintf(out_file, "%d %d %s %s", getpid(), child_id, shm_data_ptr->words[index], ctime(&now));
+	fprintf(out_file, "%d %d %s %s", getpid(), child_id, shm_data_ptr->words[child_id], ctime(&now));
 	//close file
 	fclose(out_file);
 
@@ -224,4 +232,32 @@ bool isPalindrome(char str[]){
 		}
 	}
 	return true;
+}
+
+
+/*-----------------------Function for signal handlers--------------------------------------*/
+//Upon receiving signal, stop processes
+void sighandle(int signal){
+	printf("\nReceived Ctrl+c in child process");
+	exit(1);
+}
+
+//Time's out
+void timer_exits(int signal){
+	exit(1);
+}
+
+int free_shared_mem(){
+	//detach from shared memory
+	int detach = shmdt(shm_data_ptr);
+	if(detach == -1){
+		perror("\nERROR: Failed to detached shared memory segment");
+		return 1;
+	}
+	int delete_mem = shmctl(shmid, IPC_RMID, NULL);
+	if(delete_mem == -1){
+		perror("\nERROR: Failed to remove shared memory segment");
+		return 1;
+	}
+	return 1;
 }
